@@ -1,0 +1,23 @@
+Pulse 0.1.0
+
+Pulse is a modified user frontend based on nezha-dash-v2 (Apache-2.0):
+https://github.com/hamster1963/nezha-dash-v2
+The Pulse application, layouts, styles, data projections, session isolation,
+tests, branding, development proxy and packaging were added or changed.
+The original project license is in licenses/APACHE-2.0.txt.
+
+The detail layout and visual treatments are adapted from Lotus:
+https://github.com/fl0w1nd/Lotus
+MIT License, Copyright (c) 2026 fl0w1nd.
+Full permission and warranty terms: licenses/LOTUS-MIT.txt.
+
+Inter, Geist and Geist Mono are bundled from @fontsource packages.
+Each font's SIL Open Font License is in licenses/.
+
+The world dot map is derived from Natural Earth land geometry (public domain),
+via world-atlas. Markers represent approximate country/region locations,
+not the physical location of a server or network links between servers.
+https://www.naturalearthdata.com/about/terms-of-use/
+https://github.com/topojson/world-atlas
+
+Dependencies retain their own licenses in their source distributions.

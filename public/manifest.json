@@ -1,0 +1,17 @@
+{
+	"name": "Pulse",
+	"short_name": "Pulse",
+	"icons": [
+		{
+			"src": "/pulse.svg",
+			"sizes": "any",
+			"type": "image/svg+xml",
+			"purpose": "any"
+		}
+	],
+	"theme_color": "hsl(0 0% 98%)",
+	"background_color": "hsl(0 0% 98%)",
+	"start_url": "/",
+	"display": "standalone",
+	"orientation": "portrait"
+}
