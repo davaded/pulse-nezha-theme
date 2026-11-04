@@ -151,10 +151,9 @@ beforeEach(() => {
 });
 
 describe("Pulse home and node access", () => {
-	it("renders real zero values, derived totals, groups, search, layout and offline filters", async () => {
+	it("renders real zero values, derived totals and group filters", async () => {
 		const user = userEvent.setup();
-		const { container } = view(<PulseHome />);
-		await screen.findByText("月度", {}, { timeout: 50 }).catch(() => undefined);
+		view(<PulseHome />);
 		await waitFor(() =>
 			expect(screen.getAllByText("周期流量")).toHaveLength(1),
 		);
@@ -168,9 +167,16 @@ describe("Pulse home and node access", () => {
 		await user.click(screen.getByRole("button", { name: "日本1" }));
 		expect(screen.getAllByRole("article")).toHaveLength(1);
 		await user.click(screen.getByRole("button", { name: "全部节点2" }));
-		await user.type(screen.getByRole("searchbox"), "edge");
+		expect(screen.getAllByRole("article")).toHaveLength(2);
+	});
+	it("filters search and offline status and switches card/list layout", async () => {
+		const user = userEvent.setup();
+		const { container } = view(<PulseHome />);
+		const search = screen.getByRole("searchbox");
+		await user.click(search);
+		await user.paste("edge");
 		expect(screen.getAllByRole("article")).toHaveLength(1);
-		await user.clear(screen.getByRole("searchbox"));
+		await user.clear(search);
 		await user.click(screen.getByRole("button", { name: "列表布局" }));
 		expect(container.querySelector(".orb-nodes")).toHaveClass("is-list");
 		await user.click(screen.getByRole("button", { name: "卡片布局" }));
@@ -178,7 +184,8 @@ describe("Pulse home and node access", () => {
 		await user.click(screen.getByRole("button", { name: /离线1/ }));
 		expect(screen.getAllByRole("article")).toHaveLength(1);
 		await user.click(screen.getByRole("button", { name: /离线1/ }));
-		await user.type(screen.getByRole("searchbox"), "nothing-found");
+		await user.click(search);
+		await user.paste("nothing-found");
 		expect(screen.getByText("没有符合条件的节点")).toBeVisible();
 	});
 	it("supports country selection and bounded card pagination", async () => {
