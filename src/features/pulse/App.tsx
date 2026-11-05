@@ -1,5 +1,5 @@
 import { Activity, ArrowUpRight, Moon, RefreshCw, Sun } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, type ReactNode, Suspense, useEffect, useState } from "react";
 import {
 	BrowserRouter,
 	Link,
@@ -9,20 +9,64 @@ import {
 } from "react-router-dom";
 import ErrorBoundary from "@/components/ErrorBoundary";
 import LocalErrorBoundary from "@/components/LocalErrorBoundary";
+import { Button } from "@/components/ui/button";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useLoginUser } from "@/hooks/use-login-user";
 import { useTheme } from "@/hooks/use-theme";
 import { useWebSocketContext } from "@/hooks/use-websocket-context";
 import { InjectContext } from "@/lib/inject";
 import { refreshRuntimeConfig, useRuntimeConfig } from "@/lib/runtime-config";
+import { PulseDetailAccess } from "./Access";
 import { usePulseSetting } from "./data";
 import PulseHome, { PulseState } from "./Home";
 import "./pulse.css";
 
 const Detail = lazy(() => import("./Detail"));
 
+function PulseIconButton({
+	label,
+	onClick,
+	children,
+}: {
+	label: string;
+	onClick: () => void;
+	children: ReactNode;
+}) {
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Button
+					type="button"
+					variant="outline"
+					size="icon"
+					className="orb-iconbutton"
+					aria-label={label}
+					onClick={onClick}
+				>
+					{children}
+				</Button>
+			</TooltipTrigger>
+			<TooltipContent side="bottom" className="pulse-control-tooltip">
+				{label}
+			</TooltipContent>
+		</Tooltip>
+	);
+}
+
 export function PulseHeader() {
 	const { theme, setTheme } = useTheme();
-	const { connected, reconnect } = useWebSocketContext();
+	const {
+		connected: transportConnected,
+		dataStale,
+		lastUpdated,
+		reconnect,
+	} = useWebSocketContext();
+	const connected = transportConnected && !dataStale;
 	const login = useLoginUser();
 	const config = useRuntimeConfig();
 	const dark =
@@ -41,37 +85,48 @@ export function PulseHeader() {
 				</span>
 				<span className="orb-word">pulse</span>
 			</Link>
-			<div className="orb-topright">
-				<button
-					type="button"
-					className={`pulse-connection ${connected ? "" : "is-offline"}`}
-					onClick={connected ? undefined : reconnect}
-					aria-label={connected ? "实时连接正常" : "重新连接"}
-				>
-					<i />
-					{connected ? "实时连接" : "重新连接"}
-				</button>
-				<a href="/dashboard/" className="pulse-dashboard">
-					{login.isAuthenticated ? "控制台" : "登录"}
-					<ArrowUpRight size={13} />
-				</a>
-				<button
-					type="button"
-					className="orb-iconbutton"
-					onClick={() => setTheme(dark ? "light" : "dark")}
-					aria-label="切换深浅色"
-				>
-					{dark ? <Sun /> : <Moon />}
-				</button>
-				<button
-					type="button"
-					className="orb-iconbutton"
-					onClick={reconnect}
-					aria-label="刷新连接"
-				>
-					<RefreshCw />
-				</button>
-			</div>
+			<TooltipProvider delayDuration={350}>
+				<div className="orb-topright">
+					<button
+						type="button"
+						className={`pulse-connection ${connected ? "" : "is-offline"}`}
+						onClick={connected ? undefined : reconnect}
+						aria-label={
+							dataStale
+								? "数据已过期，点击重新连接"
+								: connected
+									? "实时连接正常"
+									: "重新连接"
+						}
+						title={
+							lastUpdated
+								? `最近接收 ${new Date(lastUpdated).toLocaleTimeString("zh-CN", { hour12: false })}`
+								: undefined
+						}
+					>
+						<i />
+						{dataStale ? "数据已过期" : connected ? "实时连接" : "重新连接"}
+					</button>
+					<a
+						href="/dashboard/"
+						className="pulse-dashboard"
+						target={login.isAuthenticated ? undefined : "_blank"}
+						rel={login.isAuthenticated ? undefined : "noopener noreferrer"}
+					>
+						{login.isAuthenticated ? "控制台" : "登录"}
+						<ArrowUpRight size={13} />
+					</a>
+					<PulseIconButton
+						label="切换深浅色"
+						onClick={() => setTheme(dark ? "light" : "dark")}
+					>
+						{dark ? <Sun /> : <Moon />}
+					</PulseIconButton>
+					<PulseIconButton label="刷新连接" onClick={reconnect}>
+						<RefreshCw />
+					</PulseIconButton>
+				</div>
+			</TooltipProvider>
 		</header>
 	);
 }
@@ -185,7 +240,9 @@ export function PulseShell() {
 											loading ? (
 												<PulseState text="正在加载面板配置…" />
 											) : (
-												<Detail />
+												<PulseDetailAccess>
+													<Detail />
+												</PulseDetailAccess>
 											)
 										}
 									/>

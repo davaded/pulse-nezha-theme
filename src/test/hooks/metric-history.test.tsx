@@ -1,7 +1,7 @@
-import { QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { focusManager, QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type ChartPeriod,
 	combineMetricHistory,
@@ -23,7 +23,45 @@ beforeEach(() => {
 	client = createTestQueryClient();
 	api.fetchServerMetrics.mockReset();
 });
+afterEach(() => {
+	client.clear();
+	focusManager.setFocused(undefined);
+});
 describe("metric history boundary", () => {
+	it("refreshes foreground history and pauses polling while the page is unfocused", async () => {
+		vi.useFakeTimers();
+		focusManager.setFocused(true);
+		api.fetchServerMetrics
+			.mockResolvedValueOnce(result(10))
+			.mockResolvedValue(result(20));
+		const view = renderHook(() => useMetricHistory(7, ["cpu"], "1d"), {
+			wrapper,
+		});
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(10);
+		});
+		expect(view.result.current.data).toEqual([[{ ts: 123, value: 10 }]]);
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(60_000);
+		});
+		expect(api.fetchServerMetrics).toHaveBeenCalledTimes(2);
+		expect(view.result.current.data).toEqual([[{ ts: 123, value: 20 }]]);
+		act(() => focusManager.setFocused(false));
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(120_000);
+		});
+		expect(api.fetchServerMetrics).toHaveBeenCalledTimes(2);
+		act(() => focusManager.setFocused(true));
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(10);
+		});
+		expect(api.fetchServerMetrics).toHaveBeenCalledTimes(3);
+		view.unmount();
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(60_000);
+		});
+		expect(api.fetchServerMetrics).toHaveBeenCalledTimes(3);
+	});
 	it("keeps realtime idle and identifies successful data by actual period", async () => {
 		api.fetchServerMetrics.mockResolvedValue(result(0));
 		const view = renderHook(

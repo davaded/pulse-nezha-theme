@@ -19,6 +19,51 @@ function Probe() {
 }
 
 describe("runtime configuration boundary", () => {
+	it("validates primary cycle bindings and observes changes without invalidating stable snapshots", () => {
+		const { result } = renderHook(useRuntimeConfig);
+		act(() => {
+			window.PulsePrimaryCycleIds = {
+				"1": " custom ",
+				"2": 8,
+				"0": "x",
+				"01": "x",
+				invalid: "x",
+				"3": "",
+				"4": NaN,
+				"5": 0,
+			};
+		});
+		expect(result.current.pulsePrimaryCycleIds).toEqual({
+			"1": "custom",
+			"2": "8",
+		});
+		const previous = result.current;
+		act(() => {
+			window.PulsePrimaryCycleIds = { "1": "custom", "2": "8" };
+		});
+		expect(result.current).toBe(previous);
+		act(() => {
+			window.PulsePrimaryCycleIds = undefined;
+		});
+		expect(result.current.pulsePrimaryCycleIds).toEqual({});
+	});
+	it("validates monitor bindings and preserves stable snapshots after assignment", () => {
+		const { result } = renderHook(useRuntimeConfig);
+		act(() => {
+			window.PulseMonitorIds = [30, 30, -1, 40, NaN, 20, 99];
+		});
+		expect(result.current.pulseMonitorIds).toEqual([30, 40, 20]);
+		const previous = result.current;
+		expect(readRuntimeConfig()).toBe(previous);
+		act(() => {
+			window.PulseMonitorIds = [30, 40, 20];
+		});
+		expect(result.current).toBe(previous);
+		act(() => {
+			window.PulseMonitorIds = undefined;
+		});
+		expect(result.current.pulseMonitorIds).toEqual([]);
+	});
 	it("validates legacy globals and keeps stable snapshots", () => {
 		window.ForceTheme = "unsupported";
 		window.ForceSortType = "invalid";

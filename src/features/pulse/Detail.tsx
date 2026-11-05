@@ -2,9 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Cpu, HardDrive, Terminal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { Button } from "@/components/ui/button";
 import { useLoginUser } from "@/hooks/use-login-user";
 import { useWebSocketContext } from "@/hooks/use-websocket-context";
 import { fetchServerOnlineHistory } from "@/lib/nezha-api";
+import { useRuntimeConfig } from "@/lib/runtime-config";
 import type { CycleTransferStats } from "@/types/nezha-api";
 import { NetworkMonitor, RangePicker, ResourceCharts } from "./Charts";
 import { usePulseData, usePulseSetting } from "./data";
@@ -19,6 +21,7 @@ import {
 	isOnline,
 	number,
 	percent,
+	primaryCycleFor,
 	type Range,
 	timestamp,
 } from "./model";
@@ -41,54 +44,51 @@ export function TrafficSummary({
 	outgoing: unknown;
 }) {
 	const cycles = cyclesFor(stats, id);
+	const config = useRuntimeConfig();
+	const primary = primaryCycleFor(stats, id, config.pulsePrimaryCycleIds[id]);
 	const a = number(incoming),
 		b = number(outgoing);
 	return (
 		<>
-			{cycles.length ? (
-				cycles.map((c) => (
-					<section className="lot-card lot-summary" key={c.key}>
-						<div className="lot-summaryhead">
-							<h3>周期流量</h3>
-							<span>{c.name}</span>
-						</div>
-						<div className="lot-summaryvalue">
-							<b>{bytes(c.used)}</b>
-							<span>/ {bytes(c.max)}</span>
-						</div>
-						<div className="lot-usagebar">
-							<span
-								style={{
-									width: `${Math.min(100, percent(c.used, c.max) ?? 0)}%`,
-								}}
-							/>
-						</div>
-						<dl className="lot-summarypairs">
-							<div>
-								<dt>统计起始</dt>
-								<dd>{date(c.from)}</dd>
+			{cycles.length
+				? cycles.map((c) => (
+						<section className="lot-card lot-summary" key={c.key}>
+							<div className="lot-summaryhead">
+								<h3>周期流量</h3>
+								<span>
+									{c.name}
+									{cycles.length > 1 && c.key === primary?.key
+										? " · 主规则"
+										: ""}
+								</span>
 							</div>
-							<div>
-								<dt>本期结束</dt>
-								<dd>{date(c.to)}</dd>
+							<div className="lot-summaryvalue">
+								<b>{bytes(c.used)}</b>
+								<span>/ {bytes(c.max)}</span>
 							</div>
-						</dl>
-						<div className="lot-summaryfoot">
-							下次重置 <span>{date(c.reset)}</span>
-						</div>
-					</section>
-				))
-			) : (
-				<section className="lot-card lot-summary">
-					<div className="lot-summaryhead">
-						<h3>周期流量</h3>
-					</div>
-					<div className="lot-summaryvalue">
-						<b>—</b>
-					</div>
-					<p className="pulse-chart-note">暂无周期流量规则</p>
-				</section>
-			)}
+							<div className="lot-usagebar">
+								<span
+									style={{
+										width: `${Math.min(100, percent(c.used, c.max) ?? 0)}%`,
+									}}
+								/>
+							</div>
+							<dl className="lot-summarypairs">
+								<div>
+									<dt>统计起始</dt>
+									<dd>{date(c.from)}</dd>
+								</div>
+								<div>
+									<dt>本期结束</dt>
+									<dd>{date(c.to)}</dd>
+								</div>
+							</dl>
+							<div className="lot-summaryfoot">
+								下次重置 <span>{date(c.reset)}</span>
+							</div>
+						</section>
+					))
+				: null}
 			<section className="lot-card lot-summary">
 				<div className="lot-summaryhead">
 					<h3>累计流量</h3>
@@ -195,7 +195,13 @@ export function OnlineSummary({ id }: { id: number }) {
 
 export default function PulseDetail() {
 	const { id } = useParams();
-	const { lastData, connected, reconnect } = useWebSocketContext();
+	const {
+		lastData,
+		connected: transportConnected,
+		dataStale,
+		reconnect,
+	} = useWebSocketContext();
+	const connected = transportConnected && !dataStale;
 	const { service } = usePulseData();
 	const setting = usePulseSetting();
 	const [range, setRange] = useState<Range>(6);
@@ -225,7 +231,7 @@ export default function PulseDetail() {
 		{
 			label: "CPU",
 			value: `${fixed(usage(v?.cpu))}${live && number(v?.cpu) !== null ? "%" : ""}`,
-			note: h?.cpu?.length ? `${h.cpu.length} 项处理器信息` : "型号未上报",
+			note: h?.cpu?.[0] || "型号未上报",
 		},
 		{
 			label: "内存",
@@ -233,17 +239,20 @@ export default function PulseDetail() {
 			note: `${bytes(usage(v?.mem_used))} / ${bytes(h?.mem_total)}`,
 		},
 		{
+			label: "磁盘",
+			value: `${fixed(live ? percent(v?.disk_used, h?.disk_total) : null)}${live && percent(v?.disk_used, h?.disk_total) !== null ? "%" : ""}`,
+			note: `${bytes(usage(v?.disk_used))} / ${bytes(h?.disk_total)}`,
+		},
+		{
 			label: "交换空间",
 			value:
 				h?.swap_total === 0
 					? "未配置"
 					: `${fixed(live ? percent(v?.swap_used, h?.swap_total) : null)}${live && percent(v?.swap_used, h?.swap_total) !== null ? "%" : ""}`,
-			note: `${bytes(usage(v?.swap_used))} / ${bytes(h?.swap_total)}`,
-		},
-		{
-			label: "磁盘",
-			value: `${fixed(live ? percent(v?.disk_used, h?.disk_total) : null)}${live && percent(v?.disk_used, h?.disk_total) !== null ? "%" : ""}`,
-			note: `${bytes(usage(v?.disk_used))} / ${bytes(h?.disk_total)}`,
+			note:
+				h?.swap_total === 0
+					? "系统未配置 Swap"
+					: `${bytes(usage(v?.swap_used))} / ${bytes(h?.swap_total)}`,
 		},
 		{
 			label: "系统负载",
@@ -271,10 +280,12 @@ export default function PulseDetail() {
 	return (
 		<div className="lot-detail">
 			<header className="lot-header">
-				<Link to="/" className="lot-back">
-					<ArrowLeft />
-					返回总览
-				</Link>
+				<Button asChild variant="outline" size="sm" className="lot-back">
+					<Link to="/">
+						<ArrowLeft />
+						返回总览
+					</Link>
+				</Button>
 				<div className="lot-title">
 					<span className="lot-flag" aria-hidden="true">
 						{flag(countryCode(server))}
@@ -282,7 +293,13 @@ export default function PulseDetail() {
 					<h1>{server.name}</h1>
 					<span className={`lot-status ${live ? "" : "is-offline"}`}>
 						<i />
-						{!connected ? "连接中断" : online ? "在线" : "离线"}
+						{dataStale
+							? "数据已过期"
+							: !connected
+								? "连接中断"
+								: online
+									? "在线"
+									: "离线"}
 					</span>
 					{!online && (
 						<span className="lot-last">

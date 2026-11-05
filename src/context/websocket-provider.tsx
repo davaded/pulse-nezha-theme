@@ -12,6 +12,8 @@ interface WebSocketProviderProps {
 	children: React.ReactNode;
 }
 
+export const WEBSOCKET_STALE_MS = 30_000;
+
 type RawNezhaWebsocketResponse = Omit<
 	Partial<NezhaWebsocketResponse>,
 	"servers"
@@ -45,9 +47,13 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
 		NezhaWebsocketResponse[]
 	>([]);
 	const [connected, setConnected] = useState(false);
+	const [dataStale, setDataStale] = useState(false);
+	const [lastUpdated, setLastUpdated] = useState<number | null>(null);
 	const [needReconnect, setNeedReconnect] = useState(false);
 	const ws = useRef<WebSocket | null>(null);
 	const reconnectTimeout = useRef<NodeJS.Timeout>(null);
+	const staleTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const lastActivityAt = useRef(0);
 	const maxReconnectAttempts = 30;
 	const reconnectAttempts = useRef(0);
 	const isConnecting = useRef(false);
@@ -55,6 +61,10 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
 	const lastRecoveryAt = useRef(Number.NEGATIVE_INFINITY);
 
 	const cleanup = useCallback(() => {
+		if (staleTimeout.current) {
+			clearTimeout(staleTimeout.current);
+			staleTimeout.current = null;
+		}
 		if (ws.current) {
 			// 移除所有事件监听器
 			ws.current.onopen = null;
@@ -98,7 +108,19 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
 			const wsUrl = new URL(url, window.location.origin);
 			wsUrl.protocol = wsUrl.protocol.replace("http", "ws");
 
-			ws.current = new WebSocket(wsUrl.toString());
+			const socket = new WebSocket(wsUrl.toString());
+			ws.current = socket;
+			lastActivityAt.current = Date.now();
+			const watchForData = () => {
+				if (staleTimeout.current) clearTimeout(staleTimeout.current);
+				staleTimeout.current = setTimeout(() => {
+					if (!active.current || ws.current !== socket) return;
+					setDataStale(true);
+					cleanup();
+					scheduleRetry();
+				}, WEBSOCKET_STALE_MS);
+			};
+			watchForData();
 
 			ws.current.onopen = () => {
 				console.log("WebSocket connected");
@@ -109,6 +131,10 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
 
 			ws.current.onclose = () => {
 				console.log("WebSocket disconnected");
+				if (staleTimeout.current) {
+					clearTimeout(staleTimeout.current);
+					staleTimeout.current = null;
+				}
 				setConnected(false);
 				ws.current = null;
 				isConnecting.current = false;
@@ -128,6 +154,10 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
 						servers: restoreServerPublicNotes(response.servers),
 					};
 					setLastData(newData);
+					lastActivityAt.current = Date.now();
+					setLastUpdated(lastActivityAt.current);
+					setDataStale(false);
+					watchForData();
 					// 更新历史消息，保持最新的30条记录
 					setMessageHistory((prev) => {
 						const updated = [newData, ...prev];
@@ -166,19 +196,27 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
 		lastRecoveryAt.current = Number.NEGATIVE_INFINITY;
 		setLastData(null);
 		setMessageHistory([]);
+		setDataStale(false);
+		setLastUpdated(null);
 		connect();
 
 		const recover = () => {
+			const expired = Date.now() - lastActivityAt.current >= WEBSOCKET_STALE_MS;
 			if (
 				!active.current ||
 				navigator.onLine === false ||
-				isConnecting.current ||
-				ws.current?.readyState === WebSocket.OPEN ||
+				(!expired &&
+					(isConnecting.current ||
+						ws.current?.readyState === WebSocket.OPEN)) ||
 				reconnectTimeout.current ||
 				Date.now() - lastRecoveryAt.current < 3000
 			)
 				return;
 			lastRecoveryAt.current = Date.now();
+			if (expired && ws.current) {
+				setDataStale(true);
+				cleanup();
+			}
 			reconnectAttempts.current = 0;
 			connect();
 		};
@@ -213,6 +251,8 @@ export const WebSocketProvider: React.FC<WebSocketProviderProps> = ({
 	const contextValue: WebSocketContextType = {
 		lastData,
 		connected,
+		dataStale,
+		lastUpdated,
 		messageHistory,
 		reconnect,
 		needReconnect,

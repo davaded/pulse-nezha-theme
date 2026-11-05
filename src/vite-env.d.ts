@@ -18,4 +18,6 @@ interface Window {
 	ForceTheme?: string;
 	ForceSortType?: string;
 	ForceSortOrder?: string;
+	PulseMonitorIds?: number[];
+	PulsePrimaryCycleIds?: Record<string, string | number>;
 }

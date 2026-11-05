@@ -25,6 +25,8 @@ export interface RuntimeConfig {
 	fixedTopServerName: boolean;
 	forceUseSvgFlag: boolean;
 	disableAnimatedMan: boolean;
+	pulseMonitorIds: readonly number[];
+	pulsePrimaryCycleIds: Readonly<Record<string, string>>;
 }
 
 export const RUNTIME_CONFIG_CHANGE_EVENT = "runtimeConfigChange";
@@ -48,6 +50,8 @@ const defaults: RuntimeConfig = {
 	fixedTopServerName: false,
 	forceUseSvgFlag: false,
 	disableAnimatedMan: false,
+	pulseMonitorIds: [],
+	pulsePrimaryCycleIds: {},
 };
 
 let snapshot = defaults;
@@ -55,6 +59,29 @@ let snapshot = defaults;
 // Keep the public window.* custom_code API at this boundary.
 export function readRuntimeConfig(): RuntimeConfig {
 	if (typeof window === "undefined") return defaults;
+	const ids = Array.isArray(window.PulseMonitorIds)
+		? [...new Set(window.PulseMonitorIds)]
+				.filter((id) => Number.isSafeInteger(id) && id > 0)
+				.slice(0, 3)
+		: [];
+	const rawPrimaryIds = window.PulsePrimaryCycleIds;
+	const primaryIds = Object.fromEntries(
+		Object.entries(
+			rawPrimaryIds &&
+				typeof rawPrimaryIds === "object" &&
+				!Array.isArray(rawPrimaryIds)
+				? rawPrimaryIds
+				: {},
+		).flatMap(([id, rule]) =>
+			/^[1-9]\d*$/.test(id) &&
+			Number.isSafeInteger(Number(id)) &&
+			(typeof rule === "string" ||
+				(typeof rule === "number" && Number.isSafeInteger(rule) && rule > 0)) &&
+			String(rule).trim()
+				? [[id, String(rule).trim()]]
+				: [],
+		),
+	);
 	const next: RuntimeConfig = {
 		forceTheme:
 			window.ForceTheme === "dark" || window.ForceTheme === "light"
@@ -74,6 +101,15 @@ export function readRuntimeConfig(): RuntimeConfig {
 		fixedTopServerName: Boolean(window.FixedTopServerName),
 		forceUseSvgFlag: Boolean(window.ForceUseSvgFlag),
 		disableAnimatedMan: Boolean(window.DisableAnimatedMan),
+		pulseMonitorIds:
+			ids.join(",") === snapshot.pulseMonitorIds.join(",")
+				? snapshot.pulseMonitorIds
+				: ids,
+		pulsePrimaryCycleIds:
+			JSON.stringify(primaryIds) ===
+			JSON.stringify(snapshot.pulsePrimaryCycleIds)
+				? snapshot.pulsePrimaryCycleIds
+				: primaryIds,
 		forceSortType: SORT_TYPES.includes(window.ForceSortType as SortType)
 			? (window.ForceSortType as SortType)
 			: undefined,
@@ -115,6 +151,8 @@ const observedKeys = [
 	"FixedTopServerName",
 	"ForceUseSvgFlag",
 	"DisableAnimatedMan",
+	"PulseMonitorIds",
+	"PulsePrimaryCycleIds",
 ] as const;
 let subscribers = 0;
 let stopObserving: (() => void) | undefined;

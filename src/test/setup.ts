@@ -113,6 +113,7 @@ afterEach(() => {
 	window.FixedTopServerName = false;
 	window.ForceUseSvgFlag = false;
 	window.DisableAnimatedMan = false;
+	window.PulsePrimaryCycleIds = undefined;
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
 	vi.useRealTimers();

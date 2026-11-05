@@ -61,6 +61,8 @@ let socket: WebSocketContextType;
 let fail: string[];
 let emptyMonitor = false;
 let guest = false;
+let networkRate = 1048576;
+let cycleStats = cycle;
 const fetchMock = vi.fn();
 
 function view(ui: React.ReactElement, route = "/") {
@@ -92,8 +94,11 @@ beforeEach(() => {
 	fail = [];
 	emptyMonitor = false;
 	guest = false;
+	networkRate = 1048576;
+	cycleStats = cycle;
 	window.CustomLogo = undefined;
 	window.ForcePeakCutEnabled = false;
+	window.PulseMonitorIds = undefined;
 	refreshRuntimeConfig();
 	fetchMock.mockReset().mockImplementation(async (input: string) => {
 		const url = new URL(input, "https://localhost");
@@ -116,7 +121,7 @@ beforeEach(() => {
 		else if (url.pathname.endsWith("/server-group"))
 			data = [{ group: { id: 1, name: "日本" }, servers: [2] }];
 		else if (url.pathname === "/api/v1/service")
-			data = { services: {}, cycle_transfer_stats: cycle };
+			data = { services: {}, cycle_transfer_stats: cycleStats };
 		else if (url.pathname.endsWith("/service"))
 			data = emptyMonitor ? [] : monitors;
 		else if (url.pathname.endsWith("/metrics"))
@@ -127,7 +132,12 @@ beforeEach(() => {
 					{ ts: now - 60000, value: 0 },
 					{
 						ts: now,
-						value: url.searchParams.get("metric") === "cpu" ? 25 : 1048576,
+						value:
+							url.searchParams.get("metric") === "cpu"
+								? 25
+								: url.searchParams.get("metric")?.endsWith("_speed")
+									? networkRate
+									: 1048576,
 					},
 				],
 			};
@@ -151,6 +161,65 @@ beforeEach(() => {
 });
 
 describe("Pulse home and node access", () => {
+	it("uses the same configured primary cycle in card totals and detail labels", async () => {
+		cycleStats = {
+			...cycle,
+			quarter: {
+				...cycle.month,
+				name: "季度",
+				max: 2 * 1024 ** 4,
+				transfer: { "1": 1024 ** 4 },
+			},
+		};
+		window.PulsePrimaryCycleIds = { "1": "quarter" };
+		view(
+			<>
+				<PulseHome />
+				<TrafficSummary id={1} stats={cycleStats} incoming={0} outgoing={0} />
+			</>,
+		);
+		await screen.findByText("1/2 节点 · 额度 2.00 TiB");
+		const card = screen.getByRole("article", { name: "edge-1" });
+		expect(within(card).getByText(/1\.00 TiB \/ 2\.00 TiB/)).toBeVisible();
+		expect(screen.getByText("季度 · 主规则")).toBeVisible();
+		expect(screen.getAllByRole("heading", { name: "周期流量" })).toHaveLength(
+			2,
+		);
+	});
+	it("treats an open but stalled socket as stale and provides manual recovery", async () => {
+		socket.dataStale = true;
+		socket.lastUpdated = now;
+		view(
+			<>
+				<ThemeProvider>
+					<PulseHeader />
+				</ThemeProvider>
+				<PulseHome />
+			</>,
+		);
+		await screen.findByText("数据已过期，正在重新连接。");
+		expect(screen.getByRole("article", { name: /edge/ })).toHaveTextContent(
+			"待更新",
+		);
+		expect(
+			screen.queryByRole("button", { name: "实时连接正常" }),
+		).not.toBeInTheDocument();
+		await userEvent.click(
+			screen.getByRole("button", { name: "数据已过期，点击重新连接" }),
+		);
+		expect(socket.reconnect).toHaveBeenCalledOnce();
+	});
+	it("opens the node from content anywhere inside its card", async () => {
+		view(
+			<Routes>
+				<Route path="/" element={<PulseHome />} />
+				<Route path="/server/1" element={<h1>节点详情</h1>} />
+			</Routes>,
+		);
+		const card = await screen.findByRole("article", { name: "edge-1" });
+		await userEvent.click(within(card).getByText("CPU"));
+		await screen.findByRole("heading", { name: "节点详情" });
+	});
 	it("renders real zero values, derived totals and group filters", async () => {
 		const user = userEvent.setup();
 		view(<PulseHome />);
@@ -159,11 +228,15 @@ describe("Pulse home and node access", () => {
 		);
 		expect(screen.getAllByRole("article")).toHaveLength(2);
 		const card = screen.getByRole("article", { name: "edge-1" });
-		expect(within(card).getAllByText("0.0")).toHaveLength(3);
+		expect(within(card).getAllByText("0.0")).toHaveLength(4);
 		expect(within(card).getByText("0 B / 200 B")).toBeVisible();
-		expect(
-			screen.getByRole("article", { name: "offline-node" }),
-		).toHaveTextContent("等待节点上报");
+		expect(screen.getByText("1/2 节点 · 额度 1.00 TiB")).toBeVisible();
+		const unmetered = screen.getByRole("article", { name: "offline-node" });
+		expect(unmetered).toHaveTextContent("等待节点上报");
+		expect(within(unmetered).getByText("累计流量")).toBeVisible();
+		expect(within(unmetered).getByText("上传与下载合计")).toBeVisible();
+		expect(within(unmetered).queryByText("周期流量")).not.toBeInTheDocument();
+		expect(within(unmetered).queryByText(/TiB/)).not.toBeInTheDocument();
 		await user.click(screen.getByRole("button", { name: "日本1" }));
 		expect(screen.getAllByRole("article")).toHaveLength(1);
 		await user.click(screen.getByRole("button", { name: "全部节点2" }));
@@ -273,6 +346,18 @@ describe("Pulse home and node access", () => {
 });
 
 describe("Pulse historical charts", () => {
+	it.each([
+		[512, "B/s"],
+		[2048, "KiB/s"],
+		[1048576, "MiB/s"],
+	] as const)("keeps small network rates readable with the matching unit (%i bytes/s)", async (rate, unit) => {
+		networkRate = rate;
+		view(<ResourceCharts server={server} range={6} now={now} tsdb />);
+		await screen.findByRole("img", { name: "下行、上行趋势图，最近 6 小时" });
+		expect(screen.getByRole("heading", { name: /网络速率/ })).toHaveTextContent(
+			unit,
+		);
+	});
 	it("selects 1h, 6h and 24h without inventing API period values", async () => {
 		const onChange = vi.fn();
 		view(<RangePicker value={6} onChange={onChange} />);
@@ -297,8 +382,11 @@ describe("Pulse historical charts", () => {
 	it("fetches stored metrics once for the day, converts units and toggles every resource", async () => {
 		view(<ResourceCharts server={server} range={6} now={now} tsdb />);
 		await screen.findByRole("img", {
-			name: "CPU、内存、磁盘趋势图，最近 6 小时",
+			name: "CPU趋势图，最近 6 小时",
 		});
+		expect(screen.getAllByText("最近采样")).toHaveLength(4);
+		for (const sample of document.querySelectorAll(".pulse-sample-time time"))
+			expect(sample).toHaveAttribute("datetime", new Date(now).toISOString());
 		expect(
 			fetchMock.mock.calls.filter((c) => String(c[0]).includes("/metrics")),
 		).toHaveLength(5);
@@ -309,7 +397,7 @@ describe("Pulse historical charts", () => {
 		).toBe(true);
 		for (const label of ["CPU", "内存", "磁盘"])
 			await userEvent.click(screen.getByRole("button", { name: label }));
-		expect(screen.getByText("点击上方图例显示曲线")).toBeVisible();
+		expect(screen.getAllByText("点击上方图例显示曲线")).toHaveLength(3);
 		await userEvent.click(screen.getByRole("button", { name: "CPU" }));
 		expect(
 			screen.getByRole("img", { name: "CPU趋势图，最近 6 小时" }),
@@ -321,7 +409,7 @@ describe("Pulse historical charts", () => {
 		);
 		expect(
 			screen.getAllByText("实时采样 · 本次访问记录，历史存储未开启"),
-		).toHaveLength(2);
+		).toHaveLength(4);
 		expect(
 			fetchMock.mock.calls.some((c) => String(c[0]).includes("/metrics")),
 		).toBe(false);
@@ -332,12 +420,16 @@ describe("Pulse historical charts", () => {
 		fail = [];
 		await userEvent.click(screen.getAllByRole("button", { name: "重试" })[0]);
 		await screen.findByRole("img", {
-			name: "CPU、内存、磁盘趋势图，最近 6 小时",
+			name: "CPU趋势图，最近 6 小时",
 		});
 	});
 	it("shows real network loss, toggles matching curves/areas, cuts peaks and isolates a line", async () => {
 		view(<NetworkMonitor id={1} range={6} now={now} onRange={vi.fn()} />);
 		await screen.findByRole("img", { name: "电信、移动趋势图，最近 6 小时" });
+		expect(document.querySelector(".pulse-sample-time time")).toHaveAttribute(
+			"datetime",
+			new Date(now).toISOString(),
+		);
 		expect(screen.getAllByText("1.0%")).toHaveLength(2);
 		await userEvent.click(screen.getByRole("button", { name: "电信1.0%" }));
 		expect(
@@ -394,7 +486,7 @@ describe("Pulse single-page detail", () => {
 		expect(screen.getByText("周期流量")).toBeVisible();
 		await userEvent.click(screen.getAllByRole("button", { name: "24h" })[0]);
 		await screen.findByRole("img", {
-			name: "CPU、内存、磁盘趋势图，最近 24 小时",
+			name: "CPU趋势图，最近 24 小时",
 		});
 	});
 	it("does not reveal a nonexistent or invisible node and displays offline status", async () => {
@@ -468,7 +560,10 @@ describe("Pulse single-page detail", () => {
 		await userEvent.click(screen.getByRole("button", { name: "重试" }));
 		await screen.findByText("在线率");
 		view(<TrafficSummary id={10} incoming={null} outgoing={null} />);
-		expect(screen.getByText("暂无周期流量规则")).toBeVisible();
+		expect(
+			screen.queryByRole("heading", { name: "周期流量" }),
+		).not.toBeInTheDocument();
+		expect(screen.getByRole("heading", { name: "累计流量" })).toBeVisible();
 	});
 });
 

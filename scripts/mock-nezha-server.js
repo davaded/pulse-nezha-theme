@@ -97,6 +97,7 @@ function createServer(index) {
 const servers = Array.from({ length: serverCount }, (_, index) =>
 	createServer(index),
 );
+const cycleServers = servers.filter((server) => server.id % 2 === 1);
 let onlineCount = servers.filter(
 	(server) => !isServerOffline(server.id),
 ).length;
@@ -112,14 +113,15 @@ function updateServerMetrics() {
 			nextOnlineCount += 1;
 		}
 
-		const wave = (now / 1000 + server.id) % 100;
-		server.state.cpu = Number(wave.toFixed(2));
-		server.state.net_in_speed =
-			1024 * (20 + ((server.id * 13 + now / 1000) % 80_000));
-		server.state.net_out_speed =
-			1024 * (20 + ((server.id * 17 + now / 1000) % 80_000));
-		server.state.net_in_transfer += server.state.net_in_speed;
-		server.state.net_out_transfer += server.state.net_out_speed;
+		server.state.cpu = sampleMetric(server, "cpu", now);
+		server.state.mem_used = sampleMetric(server, "memory", now);
+		server.state.disk_used = sampleMetric(server, "disk", now);
+		server.state.net_in_speed = sampleMetric(server, "net_in_speed", now);
+		server.state.net_out_speed = sampleMetric(server, "net_out_speed", now);
+		server.state.net_in_transfer +=
+			(server.state.net_in_speed * updateIntervalMs) / 1000;
+		server.state.net_out_transfer +=
+			(server.state.net_out_speed * updateIntervalMs) / 1000;
 	}
 
 	onlineCount = nextOnlineCount;
@@ -173,10 +175,55 @@ const metricSamplers = {
 	gpu: (server, wave) => (server.host.gpu.length > 0 ? 10 + wave * 60 : 0),
 };
 const metricPeriods = {
-	"1d": { days: 1, stepMs: 15 * minuteMs },
+	"1d": { days: 1, stepMs: minuteMs },
 	"7d": { days: 7, stepMs: 60 * minuteMs },
 	"30d": { days: 30, stepMs: 6 * 60 * minuteMs },
 };
+
+// Deterministic minute samples model distinct CPU bursts, steady capacity and
+// network traffic. These signals are only used by the local mock backend.
+function sampleNoise(sample, seed) {
+	const value = Math.sin(sample * 127.1 + seed * 311.7) * 43758.5453;
+	return value - Math.floor(value);
+}
+function metricSignal(server, metric, ts) {
+	const minute = ts / minuteMs;
+	const phase = server.id * 0.77;
+	const noise = sampleNoise(Math.floor(minute), server.id) - 0.5;
+	const slow = (Math.sin(minute / 83 + phase) + 1) / 2;
+	const fast = (Math.sin(minute / 7.4 + phase) + 1) / 2;
+	if (metric === "memory")
+		return (
+			0.35 + (server.id % 5) * 0.08 + Math.sin(minute / 135 + phase) * 0.025
+		);
+	if (metric === "disk")
+		return 0.26 + (server.id % 7) * 0.07 + (minute % 1440) / 360000;
+	if (metric === "cpu")
+		return (
+			0.08 +
+			slow * 0.18 +
+			fast * 0.1 +
+			noise * 0.07 +
+			(minute % 193 > 150 && minute % 193 < 157 ? 0.3 : 0)
+		);
+	if (metric === "net_in_speed" || metric === "net_out_speed") {
+		const offset = metric === "net_out_speed" ? 1.3 : 0;
+		return (
+			0.1 +
+			fast * 0.1 +
+			Math.max(0, Math.sin(minute / 28 + phase + offset)) ** 4 * 0.48 +
+			Math.max(0, Math.sin(minute / 6 + phase)) * 0.1 +
+			noise * 0.025
+		);
+	}
+	return slow * 0.8 + noise * 0.02;
+}
+function sampleMetric(server, metric, ts, windowEnd = ts) {
+	const signal = Math.max(0, Math.min(1, metricSignal(server, metric, ts)));
+	return Number(
+		metricSamplers[metric](server, signal, (windowEnd - ts) / 1000).toFixed(2),
+	);
+}
 
 function createMetricHistory(server, metric, period) {
 	const { days, stepMs } = metricPeriods[period];
@@ -190,11 +237,9 @@ function createMetricHistory(server, metric, period) {
 		ts <= windowEnd && ts <= lastActive;
 		ts += stepMs
 	) {
-		const wave = (Math.sin(ts / (60 * minuteMs) + server.id) + 1) / 2;
-		const age = (windowEnd - ts) / 1000;
 		dataPoints.push({
 			ts,
-			value: Number(metricSamplers[metric](server, wave, age).toFixed(2)),
+			value: sampleMetric(server, metric, ts, windowEnd),
 		});
 	}
 	return {
@@ -216,42 +261,47 @@ function createMonitorHistory(server, period) {
 	) {
 		timestamps.push(ts);
 	}
-	return ["Hong Kong · ICMP", "Tokyo · TCP", "Singapore · HTTPS"].map(
-		(name, index) => {
-			const loss = timestamps.map((ts) => {
-				const sample = Math.floor(ts / stepMs) + server.id + index * 7;
-				return index === 0
+	return ["浙江电信", "浙江联通", "浙江移动"].map((name, index) => {
+		const baseline =
+			{ US: 170, SG: 44, JP: 48, DE: 210, GB: 218, FR: 214 }[
+				server.country_code
+			] ?? 80;
+		const loss = timestamps.map((ts) => {
+			const sample = Math.floor(ts / stepMs) + server.id + index * 7;
+			return index === 0
+				? 0
+				: sample % 887 === 0
+					? 100
+					: sample % 79 === 0
+						? 1 + index
+						: 0;
+		});
+		return {
+			monitor_id: index + 1,
+			monitor_name: name,
+			display_index: 3 - index,
+			server_id: server.id,
+			server_name: server.name,
+			created_at: timestamps,
+			avg_delay: timestamps.map((ts, sample) =>
+				loss[sample] === 100
 					? 0
-					: sample % 43 === 0
-						? 100
-						: sample % 11 === 0
-							? 5 + index * 3
-							: 0;
-			});
-			return {
-				monitor_id: index + 1,
-				monitor_name: name,
-				display_index: 3 - index,
-				server_id: server.id,
-				server_name: server.name,
-				created_at: timestamps,
-				avg_delay: timestamps.map((ts, sample) =>
-					loss[sample] === 100
-						? 0
-						: Number(
-								(
-									25 +
-									index * 40 +
-									(Math.sin(ts / (60 * minuteMs) + server.id + index) + 1) *
-										(6 + index * 8) +
-									loss[sample] * 3
-								).toFixed(2),
-							),
-				),
-				packet_loss: loss,
-			};
-		},
-	);
+					: Number(
+							(
+								baseline +
+								index * 18 +
+								Math.sin(ts / (26 * minuteMs) + server.id + index) * 2 +
+								(sampleNoise(ts / stepMs, server.id + index * 7) - 0.5) * 4 +
+								(Math.floor(ts / stepMs + index * 11) % 181 === 0
+									? 22 + index * 14
+									: 0) +
+								loss[sample] * 2
+							).toFixed(2),
+						),
+			),
+			packet_loss: loss,
+		};
+	});
 }
 
 function createOnlineHistory(server, days) {
@@ -552,13 +602,13 @@ const httpServer = http.createServer((request, response) => {
 							max: 2 ** 40,
 							min: 0,
 							server_name: Object.fromEntries(
-								servers.map((s) => [s.id, s.name]),
+								cycleServers.map((s) => [s.id, s.name]),
 							),
 							transfer: Object.fromEntries(
-								servers.map((s) => [s.id, 2 ** 30 * s.id * 75]),
+								cycleServers.map((s) => [s.id, 2 ** 30 * s.id * 75]),
 							),
 							next_update: Object.fromEntries(
-								servers.map((s) => [
+								cycleServers.map((s) => [
 									s.id,
 									new Date(startedAt + 15 * dayMs).toISOString(),
 								]),
@@ -603,6 +653,7 @@ websocketServer.on("connection", (websocket) => {
 });
 
 if (updateIntervalMs > 0) {
+	updateServerMetrics();
 	setInterval(() => {
 		updateServerMetrics();
 		const payload = websocketPayload();

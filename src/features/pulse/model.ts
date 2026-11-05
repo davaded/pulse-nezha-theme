@@ -6,7 +6,14 @@ import type {
 	NezhaWebsocketResponse,
 } from "@/types/nezha-api";
 
-export const COLORS = ["#42a9dc", "#00bc87", "#e87399", "#a29ad9", "#cfab6a"];
+export const COLORS = [
+	"var(--orb-blue)",
+	"var(--orb-violet)",
+	"var(--orb-green)",
+	"var(--orb-amber)",
+	"var(--orb-red)",
+];
+export type Probe = { key: string; id: number; name: string; color: string };
 export type Range = 1 | 6 | 24;
 export type PlotPoint = { ts: number; [key: string]: number | null };
 
@@ -95,13 +102,25 @@ function sum(values: (number | null)[]) {
 		? values.reduce<number>((a, b) => a + (b ?? 0), 0)
 		: null;
 }
+export function primaryCycleFor(
+	stats: CycleTransferStats | undefined,
+	id: number,
+	preferredId?: string,
+) {
+	const cycles = cyclesFor(stats, id);
+	return cycles.find((cycle) => cycle.key === preferredId) ?? cycles[0];
+}
 export function totals(
 	data: NezhaWebsocketResponse,
 	stats?: CycleTransferStats,
+	primaryIds: Readonly<Record<string, string>> = {},
 ) {
 	const online = data.servers.filter((s) => isOnline(s, data.now));
 	const cpu = online.map((s) => number(s.state?.cpu));
-	const cycle = data.servers.flatMap((s) => cyclesFor(stats, s.id));
+	const cycle = data.servers.flatMap((s) => {
+		const primary = primaryCycleFor(stats, s.id, primaryIds[s.id]);
+		return primary ? [primary] : [];
+	});
 	return {
 		online: online.length,
 		down: sum(online.map((s) => number(s.state?.net_in_speed))),
@@ -124,6 +143,7 @@ export function totals(
 		diskTotal: sum(online.map((s) => number(s.host?.disk_total))),
 		cycleUsed: sum(cycle.map((c) => c.used)),
 		cycleMax: sum(cycle.map((c) => c.max)),
+		cycleCount: cycle.length,
 	};
 }
 
@@ -147,7 +167,10 @@ export function joinMetrics(
 export function inRange(points: PlotPoint[], range: Range, now: number) {
 	return points.filter((p) => p.ts >= now - range * 3600000 && p.ts <= now);
 }
-export function monitorSeries(monitors: NezhaMonitor[]) {
+export function monitorSeries(
+	monitors: NezhaMonitor[],
+	preferredIds: readonly number[] = [],
+) {
 	const rows = new Map<number, PlotPoint>();
 	const probes = monitors.map((m, index) => {
 		const key = `v${index}`;
@@ -155,18 +178,38 @@ export function monitorSeries(monitors: NezhaMonitor[]) {
 			const time = ts < 1e12 ? ts * 1000 : ts;
 			if (!Number.isFinite(time)) return;
 			const row = rows.get(time) ?? { ts: time };
-			row[key] = number(m.avg_delay[i]);
+			row[key] = m.packet_loss?.[i] === 100 ? null : number(m.avg_delay[i]);
 			row[`${key}loss`] = number(m.packet_loss?.[i]);
 			rows.set(time, row);
 		});
+		const preferred = preferredIds.indexOf(m.monitor_id);
+		const carrier = ["电信", "联通", "移动"].findIndex((name) =>
+			m.monitor_name.includes(name),
+		);
 		return {
 			key,
 			id: m.monitor_id,
 			name: m.monitor_name,
-			color: COLORS[index % COLORS.length],
+			color:
+				COLORS[
+					(preferred >= 0 ? preferred : carrier >= 0 ? carrier : index) %
+						COLORS.length
+				],
 		};
 	});
 	return { probes, points: [...rows.values()].sort((a, b) => a.ts - b.ts) };
+}
+
+/** Explicit IDs win. Recognize exact Zhejiang task names without relabeling others. */
+export function cardProbes(probes: Probe[], preferredIds: readonly number[]) {
+	if (preferredIds.length)
+		return preferredIds.flatMap((id) =>
+			probes.filter((probe) => probe.id === id),
+		);
+	const zhejiang = ["浙江电信", "浙江联通", "浙江移动"].flatMap((name) =>
+		probes.filter((probe) => probe.name === name),
+	);
+	return zhejiang.length ? zhejiang : probes.slice(0, 3);
 }
 export function probeStats(points: PlotPoint[], key: string) {
 	const delays = points

@@ -18,6 +18,8 @@ export function useMetricHistory(
 			enabled: period !== "realtime",
 			retry: false,
 			staleTime: 30_000,
+			refetchInterval: 60_000,
+			refetchIntervalInBackground: false,
 			queryFn: async ({ signal }: { signal: AbortSignal }) => {
 				if (period === "realtime") return [] as MetricPoint[];
 				const response = await fetchServerMetrics(serverId, metric, period, {

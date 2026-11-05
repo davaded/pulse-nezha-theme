@@ -7,6 +7,8 @@ import {
 	Cpu,
 	HardDrive,
 	LayoutGrid,
+	LockKeyhole,
+	type LucideIcon,
 	MemoryStick,
 	Network,
 	Rows3,
@@ -14,12 +16,15 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { useLoginUser } from "@/hooks/use-login-user";
 import { useWebSocketContext } from "@/hooks/use-websocket-context";
+import { useRuntimeConfig } from "@/lib/runtime-config";
 import type { CycleTransferStats, NezhaServer } from "@/types/nezha-api";
 import { usePulseData, usePulseMonitor } from "./data";
 import { PulseMap } from "./Map";
 import {
 	bytes,
+	cardProbes,
 	countryCode,
 	countryName,
 	cyclesFor,
@@ -30,6 +35,7 @@ import {
 	monitorSeries,
 	number,
 	percent,
+	primaryCycleFor,
 	probeStats,
 	totals,
 } from "./model";
@@ -44,6 +50,7 @@ export function PulseState({
 	error?: boolean;
 	retry?: () => void;
 }) {
+	const login = useLoginUser();
 	return (
 		<div className="orb-empty pulse-state" role={error ? "alert" : "status"}>
 			<span>{text}</span>
@@ -52,9 +59,11 @@ export function PulseState({
 					重新加载
 				</button>
 			)}
-			<Link to="/dashboard/">
-				登录控制台 <ArrowRight size={13} />
-			</Link>
+			{error && login.authStatus === "anonymous" && (
+				<a href="/dashboard/" target="_blank" rel="noopener noreferrer">
+					登录控制台 <ArrowRight size={13} />
+				</a>
+			)}
 		</div>
 	);
 }
@@ -64,16 +73,21 @@ export function Resource({
 	value,
 	note,
 	color,
+	icon: Icon,
 }: {
 	name: string;
 	value: number | null;
 	note: string;
 	color: string;
+	icon: LucideIcon;
 }) {
 	return (
-		<div>
+		<div className="orb-resource">
 			<div className="orb-resource-label">
-				{name}
+				<span>
+					<Icon />
+					{name}
+				</span>
 				<b className={value !== null && value > 85 ? "warning" : ""}>
 					{fixed(value)}
 					<small>{value !== null ? "%" : ""}</small>
@@ -85,7 +99,9 @@ export function Resource({
 					style={{ width: `${Math.min(100, value ?? 0)}%` }}
 				/>
 			</div>
-			<div className="orb-resource-amount">{note}</div>
+			<div className="orb-resource-amount" title={note}>
+				{note}
+			</div>
 		</div>
 	);
 }
@@ -102,169 +118,209 @@ function NodeCard({
 	connected: boolean;
 }) {
 	const monitor = usePulseMonitor(s.id);
+	const config = useRuntimeConfig();
+	const login = useLoginUser();
 	const online = isOnline(s, now);
 	const live = online && connected;
 	const cycles = cyclesFor(cycleStats, s.id);
-	const cycle = cycles[0];
+	const cycle = primaryCycleFor(
+		cycleStats,
+		s.id,
+		config.pulsePrimaryCycleIds[s.id],
+	);
+	const cyclePercent = cycle ? percent(cycle.used, cycle.max) : null;
 	const code = countryCode(s);
 	const note = readNote(s.public_note, now);
-	const { probes, points } = monitorSeries(monitor.data ?? []);
+	const { probes: allProbes, points } = monitorSeries(
+		monitor.data ?? [],
+		config.pulseMonitorIds,
+	);
+	const probes = cardProbes(allProbes, config.pulseMonitorIds);
 	const v = s.state,
 		h = s.host;
+	const transfer =
+		v?.net_in_transfer == null || v?.net_out_transfer == null
+			? null
+			: v.net_in_transfer + v.net_out_transfer;
 	return (
-		<article
-			className={`orb-node ${online ? "" : "is-offline"}`}
-			aria-label={s.name}
-		>
-			<div className="orb-nodehead">
-				<span className="orb-flag" aria-hidden="true">
-					{flag(code)}
-				</span>
-				<div className="orb-nametext">
-					<Link to={`/server/${s.id}`} className="orb-nodename">
-						{s.name}
-					</Link>
-					<div className="orb-nodeinfo">
-						{countryName(code)} · {h?.platform || "系统未知"} · {h?.arch || "—"}
+		<Link to={`/server/${s.id}`} className="orb-node-link" aria-label={s.name}>
+			<article
+				className={`orb-node ${online ? "" : "is-offline"}`}
+				aria-label={s.name}
+			>
+				<div className="orb-nodehead">
+					<span className="orb-flag" aria-hidden="true">
+						{flag(code)}
+					</span>
+					<div className="orb-nametext">
+						<span className="orb-nodename">{s.name}</span>
+						<div className="orb-nodeinfo">
+							{countryName(code)} · {h?.platform || "系统未知"} ·{" "}
+							{h?.arch || "—"}
+						</div>
+					</div>
+					<div className="orb-nodeflags">
+						<span className={`orb-state ${!live ? "bad" : ""}`}>
+							<i />
+							{!connected ? "待更新" : online ? "在线" : "离线"}
+						</span>
+						{note.daysLeft !== undefined && note.daysLeft <= 14 && (
+							<span className="orb-expiry" title={note.expires}>
+								{note.daysLeft < 0 ? "已到期" : `${note.daysLeft} 天后到期`}
+							</span>
+						)}
 					</div>
 				</div>
-				<div className="orb-nodeflags">
-					<span className={`orb-state ${!live ? "bad" : ""}`}>
-						<i />
-						{!connected ? "待更新" : online ? "在线" : "离线"}
+				<div className="orb-resources">
+					<Resource
+						name="CPU"
+						icon={Cpu}
+						value={live ? number(v?.cpu) : null}
+						color="cpu"
+						note={
+							h?.cpu?.length
+								? h.cpu[0].replace(/\s*\d+\s*Physical.*$/i, "")
+								: "型号未上报"
+						}
+					/>
+					<Resource
+						name="内存"
+						icon={MemoryStick}
+						value={live ? percent(v?.mem_used, h?.mem_total) : null}
+						color="memory"
+						note={`${live ? bytes(v?.mem_used) : "—"} / ${bytes(h?.mem_total)}`}
+					/>
+					<Resource
+						name="磁盘"
+						icon={HardDrive}
+						value={live ? percent(v?.disk_used, h?.disk_total) : null}
+						color="disk"
+						note={`${live ? bytes(v?.disk_used) : "—"} / ${bytes(h?.disk_total)}`}
+					/>
+					<div className={`orb-cycle${cycle ? "" : " is-cumulative"}`}>
+						<div className="orb-resource-label">
+							<span>
+								<Network />
+								{cycle ? "周期流量" : "累计流量"}
+							</span>
+							{cycle && (
+								<b>
+									{fixed(cyclePercent)}
+									{cyclePercent !== null && <small>%</small>}
+								</b>
+							)}
+						</div>
+						{cycle ? (
+							<div className="orb-meter">
+								<span
+									className="traffic"
+									style={{ width: `${Math.min(100, cyclePercent ?? 0)}%` }}
+								/>
+							</div>
+						) : (
+							<div className="orb-transfer-value">{bytes(transfer)}</div>
+						)}
+						<div
+							className="orb-resource-amount"
+							title={
+								cycle
+									? `主规则 ${cycle.name}: ${bytes(cycle.used)} / ${bytes(cycle.max)}`
+									: undefined
+							}
+						>
+							{cycle
+								? `${bytes(cycle.used)} / ${bytes(cycle.max)}`
+								: "上传与下载合计"}
+							{cycles.length > 1 && ` · ${cycles.length} 个规则`}
+						</div>
+					</div>
+				</div>
+				<div className="orb-speed">
+					<span>
+						<ArrowDown />
+						<small>下载</small>
+						<b>{live ? bytes(v?.net_in_speed, true) : "—"}</b>
 					</span>
-					{note.daysLeft !== undefined && note.daysLeft <= 14 && (
-						<span className="orb-expiry" title={note.expires}>
-							{note.daysLeft < 0 ? "已到期" : `${note.daysLeft} 天后到期`}
+					<span className="up">
+						<ArrowUp />
+						<small>上传</small>
+						<b>{live ? bytes(v?.net_out_speed, true) : "—"}</b>
+					</span>
+				</div>
+				<div className="orb-pings">
+					{probes.length ? (
+						probes.map((p) => {
+							const stats = probeStats(points, p.key);
+							const samples = points.slice(-40).map((x) => x[p.key]);
+							const max = Math.max(
+								1,
+								...samples.filter((x): x is number => x != null),
+							);
+							return (
+								<div key={p.id}>
+									<div className="orb-pingtitle">
+										<span title={p.name}>{p.name}</span>
+									</div>
+									<div className="orb-pingvalue" style={{ color: p.color }}>
+										{fixed(live ? stats.current : null, 0)}
+										<small>ms</small>
+									</div>
+									<svg
+										className="orb-mini"
+										viewBox="0 0 100 18"
+										preserveAspectRatio="none"
+										aria-label={`${p.name}延迟趋势`}
+									>
+										<path
+											d={samples
+												.map((x, i) =>
+													x === null || x === undefined
+														? ""
+														: `${i === 0 || samples[i - 1] == null ? "M" : "L"}${(i / Math.max(1, samples.length - 1)) * 100},${17 - (x / max) * 15}`,
+												)
+												.join(" ")}
+											fill="none"
+											stroke={p.color}
+											strokeWidth="1.2"
+										/>
+									</svg>
+									<small
+										className={`orb-loss ${stats.loss !== null && stats.loss > 0 ? "has-loss" : ""}`}
+										title={
+											stats.loss === null ? "该线路未上报丢包率" : undefined
+										}
+									>
+										24h 丢包 {fixed(stats.loss)}
+										{stats.loss !== null ? "%" : ""}
+									</small>
+								</div>
+							);
+						})
+					) : (
+						<span className="pulse-monitor-empty">
+							{monitor.isError
+								? "网络监控暂不可用"
+								: monitor.isPending
+									? "正在读取网络监控…"
+									: config.pulseMonitorIds.length
+										? "所选线路暂无监控数据"
+										: "暂无网络监控"}
 						</span>
 					)}
 				</div>
-			</div>
-			<div className="orb-resources">
-				<Resource
-					name="CPU"
-					value={live ? number(v?.cpu) : null}
-					color="cpu"
-					note={
-						h?.cpu?.length
-							? h.cpu[0].replace(/\s*\d+\s*Physical.*$/i, "")
-							: "型号未上报"
-					}
-				/>
-				<Resource
-					name="内存"
-					value={live ? percent(v?.mem_used, h?.mem_total) : null}
-					color="memory"
-					note={`${live ? bytes(v?.mem_used) : "—"} / ${bytes(h?.mem_total)}`}
-				/>
-				<Resource
-					name="磁盘"
-					value={live ? percent(v?.disk_used, h?.disk_total) : null}
-					color="disk"
-					note={`${live ? bytes(v?.disk_used) : "—"} / ${bytes(h?.disk_total)}`}
-				/>
-			</div>
-			<div className="orb-speed">
-				<span>
-					<ArrowDown />
-					{live ? bytes(v?.net_in_speed, true) : "—"}
-				</span>
-				<span className="up">
-					<ArrowUp />
-					{live ? bytes(v?.net_out_speed, true) : "—"}
-				</span>
-			</div>
-			<div className="orb-cycle">
-				<div className="orb-cycleline">
-					<span>
-						{cycle
-							? `周期流量${cycles.length > 1 ? ` · ${cycles.length} 个规则` : ""}`
-							: "累计流量"}
+				<div className="orb-nodefooter">
+					<span className="orb-clock">
+						<Clock3 />
+						{live ? `连续在线 ${duration(v?.uptime)}` : "等待节点上报"}
 					</span>
-					<b>
-						{cycle
-							? bytes(cycle.used)
-							: bytes(
-									v?.net_in_transfer == null || v?.net_out_transfer == null
-										? null
-										: v.net_in_transfer + v.net_out_transfer,
-								)}
-						{cycle && <small>/ {bytes(cycle.max)}</small>}
-					</b>
-				</div>
-				<div className="orb-meter">
-					<span
-						className="traffic"
-						style={{
-							width: `${cycle ? Math.min(100, percent(cycle.used, cycle.max) ?? 0) : 0}%`,
-						}}
-					/>
-				</div>
-			</div>
-			<div className="orb-pings">
-				{probes.length ? (
-					probes.slice(0, 3).map((p) => {
-						const stats = probeStats(points, p.key);
-						const samples = points.slice(-40).map((x) => x[p.key]);
-						const max = Math.max(
-							1,
-							...samples.filter((x): x is number => x != null),
-						);
-						return (
-							<div key={p.id}>
-								<div className="orb-pingtitle">
-									<span title={p.name}>{p.name}</span>
-									{stats.loss !== null && (
-										<small className="orb-loss">{fixed(stats.loss)}%</small>
-									)}
-								</div>
-								<div className="orb-pingvalue" style={{ color: p.color }}>
-									{fixed(stats.current, 0)}
-									<small>ms</small>
-								</div>
-								<svg
-									className="orb-mini"
-									viewBox="0 0 100 18"
-									preserveAspectRatio="none"
-									aria-label={`${p.name}延迟趋势`}
-								>
-									<path
-										d={samples
-											.map((x, i) =>
-												x === null || x === undefined
-													? ""
-													: `${i === 0 || samples[i - 1] == null ? "M" : "L"}${(i / Math.max(1, samples.length - 1)) * 100},${17 - (x / max) * 15}`,
-											)
-											.join(" ")}
-										fill="none"
-										stroke={p.color}
-										strokeWidth="1.2"
-									/>
-								</svg>
-							</div>
-						);
-					})
-				) : (
-					<span className="pulse-monitor-empty">
-						{monitor.isError
-							? "网络监控暂不可用"
-							: monitor.isPending
-								? "正在读取网络监控…"
-								: "暂无网络监控"}
+					<span className="orb-detailbtn" aria-hidden="true">
+						{!login.isAuthenticated && <LockKeyhole />}
+						详情
+						<ChevronRight />
 					</span>
-				)}
-			</div>
-			<div className="orb-nodefooter">
-				<span className="orb-clock">
-					<Clock3 />
-					{live ? `连续在线 ${duration(v?.uptime)}` : "等待节点上报"}
-				</span>
-				<Link className="orb-detailbtn" to={`/server/${s.id}`}>
-					详情
-					<ChevronRight />
-				</Link>
-			</div>
-		</article>
+				</div>
+			</article>
+		</Link>
 	);
 }
 
@@ -275,8 +331,15 @@ export default function PulseHome({
 	configurationLoading?: boolean;
 	backendError?: Error | null;
 }) {
-	const { lastData, connected, reconnect } = useWebSocketContext();
+	const {
+		lastData,
+		connected: transportConnected,
+		dataStale,
+		reconnect,
+	} = useWebSocketContext();
+	const connected = transportConnected && !dataStale;
 	const { groups, service } = usePulseData();
+	const config = useRuntimeConfig();
 	const [group, setGroup] = useState(0),
 		[country, setCountry] = useState("");
 	const [query, setQuery] = useState(""),
@@ -301,7 +364,7 @@ export default function PulseHome({
 			/>
 		);
 	const stats = service.data?.data?.cycle_transfer_stats;
-	const t = totals(lastData, stats);
+	const t = totals(lastData, stats, config.pulsePrimaryCycleIds);
 	const groupIds = groups.data?.data?.find(
 		(g) => g.group.id === group,
 	)?.servers;
@@ -323,12 +386,13 @@ export default function PulseHome({
 		},
 		{
 			icon: Network,
-			label: "本周期流量",
+			label: "周期用量合计",
 			value: bytes(t.cycleUsed),
 			note:
 				t.cycleMax === null
 					? "暂无周期流量规则"
-					: `总额度 ${bytes(t.cycleMax)}`,
+					: `${t.cycleCount}/${lastData.servers.length} 节点 · 额度 ${bytes(t.cycleMax)}`,
+			help: "每个节点只统计主规则；各节点的计费周期可能不同。",
 		},
 		{
 			icon: ArrowUp,
@@ -359,31 +423,38 @@ export default function PulseHome({
 		<div className="orb-overview">
 			<section className="orb-hero">
 				<div className="orb-intro">
-					<h1>运行概况</h1>
-					<p className="orb-subtitle">
-						{lastData.servers.length} 个节点 ·{" "}
-						{new Set(lastData.servers.map(countryCode).filter(Boolean)).size}{" "}
-						个地区
-					</p>
-					<div className="orb-statusline">
-						<span className="orb-onlinestatus">
-							<i className="orb-online" />
-							在线<strong>{t.online}</strong>
-						</span>
-						<span className="orb-statusdivider" />
-						<button
-							type="button"
-							className="orb-offlinebtn"
-							aria-pressed={offline}
-							onClick={() => setOffline(!offline)}
-						>
-							离线<strong>{lastData.servers.length - t.online}</strong>
-							<ChevronRight />
-						</button>
+					<div className="pulse-overview-heading">
+						<div>
+							<h1>运行概况</h1>
+							<p className="orb-subtitle">
+								{lastData.servers.length} 个节点 ·{" "}
+								{
+									new Set(lastData.servers.map(countryCode).filter(Boolean))
+										.size
+								}{" "}
+								个地区
+							</p>
+						</div>
+						<div className="orb-statusline">
+							<span className="orb-onlinestatus">
+								<i className="orb-online" />
+								在线<strong>{t.online}</strong>
+							</span>
+							<span className="orb-statusdivider" />
+							<button
+								type="button"
+								className="orb-offlinebtn"
+								aria-pressed={offline}
+								onClick={() => setOffline(!offline)}
+							>
+								离线<strong>{lastData.servers.length - t.online}</strong>
+								<ChevronRight />
+							</button>
+						</div>
 					</div>
 					<div className="orb-hero-stats">
 						{hero.map((item) => (
-							<div key={item.label} className="orb-hero-stat">
+							<div key={item.label} className="orb-hero-stat" title={item.help}>
 								<div className="orb-stat-label">
 									<item.icon />
 									{item.label}
@@ -394,11 +465,19 @@ export default function PulseHome({
 						))}
 					</div>
 				</div>
-				<PulseMap data={lastData} selected={country} onSelect={setCountry} />
+				<div className="pulse-map-panel">
+					<div className="pulse-map-heading">
+						<span>节点分布</span>
+						<span>点击地区筛选</span>
+					</div>
+					<PulseMap data={lastData} selected={country} onSelect={setCountry} />
+				</div>
 			</section>
 			{!connected && (
 				<div className="pulse-notice" role="status">
-					连接已中断，正在显示最后收到的数据。
+					{dataStale
+						? "数据已过期，正在重新连接。"
+						: "连接已中断，正在显示最后收到的数据。"}
 					<button type="button" onClick={reconnect}>
 						重新连接
 					</button>

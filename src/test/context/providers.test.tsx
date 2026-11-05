@@ -12,7 +12,10 @@ import { CommandProvider } from "@/context/command-provider";
 import { SortProvider } from "@/context/sort-provider";
 import { StatusProvider } from "@/context/status-provider";
 import { TooltipProvider } from "@/context/tooltip-provider";
-import { WebSocketProvider } from "@/context/websocket-provider";
+import {
+	WEBSOCKET_STALE_MS,
+	WebSocketProvider,
+} from "@/context/websocket-provider";
 import { useCommand } from "@/hooks/use-command";
 import { useSort } from "@/hooks/use-sort";
 import { useStatus } from "@/hooks/use-status";
@@ -128,6 +131,8 @@ function TooltipProbe() {
 function WebSocketProbe() {
 	const {
 		connected,
+		dataStale,
+		lastUpdated,
 		lastData,
 		messageHistory,
 		needReconnect,
@@ -138,6 +143,8 @@ function WebSocketProbe() {
 	return (
 		<div>
 			<p>{connected ? "connected" : "disconnected"}</p>
+			<p data-testid="data-freshness">{dataStale ? "stale" : "fresh"}</p>
+			<p data-testid="last-update">{lastUpdated ?? "no-update"}</p>
 			<p>{lastData?.servers[0]?.name ?? "none"}</p>
 			<p data-testid="message-count">{messageHistory.length}</p>
 			<p data-testid="history-server-count">
@@ -299,6 +306,85 @@ describe("WebSocketProvider", () => {
 		expect(screen.getByText("none")).toBeInTheDocument();
 		expect(screen.getByTestId("message-count")).toHaveTextContent("3");
 		expect(screen.getByTestId("history-server-count")).toHaveTextContent("0");
+	});
+
+	it("reconnects a stalled open connection and only clears stale data after a valid sample", () => {
+		vi.useFakeTimers();
+		renderWebSocketProvider(<WebSocketProbe />);
+		const socket = FakeWebSocket.instances[0];
+		act(() => {
+			socket.open();
+			socket.message(websocketPayload("last-known"));
+		});
+		const receivedAt = Date.now();
+		expect(screen.getByTestId("last-update")).toHaveTextContent(
+			String(receivedAt),
+		);
+		act(() => vi.advanceTimersByTime(WEBSOCKET_STALE_MS));
+		expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+		expect(screen.getByTestId("data-freshness")).toHaveTextContent("stale");
+		expect(screen.getByText("last-known")).toBeVisible();
+		act(() => vi.advanceTimersByTime(3000));
+		expect(FakeWebSocket.instances).toHaveLength(2);
+		act(() => FakeWebSocket.instances[1].open());
+		expect(screen.getByTestId("data-freshness")).toHaveTextContent("stale");
+		act(() =>
+			FakeWebSocket.instances[1].message(websocketPayload("new-sample")),
+		);
+		expect(screen.getByTestId("data-freshness")).toHaveTextContent("fresh");
+		expect(screen.getByTestId("last-update")).toHaveTextContent(
+			String(Date.now()),
+		);
+		expect(screen.getByText("new-sample")).toBeVisible();
+	});
+
+	it("extends the deadline for valid samples but not malformed frames", () => {
+		vi.useFakeTimers();
+		vi.spyOn(console, "error").mockImplementation(() => undefined);
+		renderWebSocketProvider(<WebSocketProbe />);
+		const socket = FakeWebSocket.instances[0];
+		act(() => {
+			socket.open();
+			vi.advanceTimersByTime(WEBSOCKET_STALE_MS - 1000);
+			socket.message(websocketPayload("new-deadline"));
+			vi.advanceTimersByTime(2000);
+			socket.message("not-json");
+		});
+		expect(socket.readyState).toBe(FakeWebSocket.OPEN);
+		act(() => vi.advanceTimersByTime(WEBSOCKET_STALE_MS - 2000));
+		expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+		expect(screen.getByTestId("data-freshness")).toHaveTextContent("stale");
+	});
+
+	it("recovers a connection stuck in CONNECTING and cancels its watchdog on unmount", () => {
+		vi.useFakeTimers();
+		const view = renderWebSocketProvider(<WebSocketProbe />);
+		const socket = FakeWebSocket.instances[0];
+		act(() => vi.advanceTimersByTime(WEBSOCKET_STALE_MS + 3000));
+		expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+		expect(FakeWebSocket.instances).toHaveLength(2);
+		view.unmount();
+		act(() => vi.advanceTimersByTime(WEBSOCKET_STALE_MS + 3000));
+		expect(FakeWebSocket.instances).toHaveLength(2);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("immediately recovers stale data when a suspended page regains focus", () => {
+		vi.useFakeTimers();
+		renderWebSocketProvider(<WebSocketProbe />);
+		const socket = FakeWebSocket.instances[0];
+		act(() => {
+			socket.open();
+			socket.message(websocketPayload("before-suspend"));
+		});
+		vi.setSystemTime(Date.now() + WEBSOCKET_STALE_MS + 1000);
+		act(() => {
+			window.dispatchEvent(new Event("focus"));
+			window.dispatchEvent(new Event("focus"));
+		});
+		expect(socket.readyState).toBe(FakeWebSocket.CLOSED);
+		expect(FakeWebSocket.instances).toHaveLength(2);
+		expect(screen.getByTestId("data-freshness")).toHaveTextContent("stale");
 	});
 
 	it("keeps only the latest thirty websocket messages", () => {

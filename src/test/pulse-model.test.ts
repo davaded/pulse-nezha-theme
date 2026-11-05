@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { realtimePoints } from "@/features/pulse/Charts";
 import {
 	bytes,
+	cardProbes,
 	countryCode,
 	countryName,
 	cyclesFor,
@@ -15,6 +16,7 @@ import {
 	number,
 	peakLimit,
 	percent,
+	primaryCycleFor,
 	probeStats,
 	timestamp,
 	totals,
@@ -48,6 +50,21 @@ const cycles: CycleTransferStats = {
 };
 
 describe("Pulse actual-data projections", () => {
+	it("binds card lines by monitor ID and recognizes Zhejiang names without renaming unrelated targets", () => {
+		const probes = [
+			{ key: "v0", id: 10, name: "Tokyo · TCP", color: "blue" },
+			{ key: "v1", id: 20, name: "浙江移动", color: "green" },
+			{ key: "v2", id: 30, name: "浙江电信", color: "blue" },
+			{ key: "v3", id: 40, name: "浙江联通", color: "violet" },
+		];
+		expect(cardProbes(probes, []).map((p) => p.id)).toEqual([30, 40, 20]);
+		expect(cardProbes(probes, [40, 10, 999]).map((p) => p.name)).toEqual([
+			"浙江联通",
+			"Tokyo · TCP",
+		]);
+		expect(cardProbes(probes, [999])).toEqual([]);
+		expect(cardProbes(probes.slice(0, 1), [])[0].name).toBe("Tokyo · TCP");
+	});
 	it("preserves zero and rejects missing, negative and nonfinite measurements", () => {
 		for (const value of [undefined, null, "0", NaN, Infinity, -1]) {
 			expect(number(value)).toBeNull();
@@ -126,8 +143,9 @@ describe("Pulse actual-data projections", () => {
 		expect(t.memoryTotal).toBe(200);
 		expect(t.down).toBe(1048576);
 		expect(t.transfer).toBe(6 * 1024 ** 3);
-		expect(t.cycleUsed).toBe(50);
-		expect(t.cycleMax).toBe(300);
+		expect(t.cycleUsed).toBe(0);
+		expect(t.cycleMax).toBe(100);
+		expect(t.cycleCount).toBe(1);
 		expect(totals({ now, servers: [] }).cpu).toBeNull();
 		expect(
 			totals({
@@ -135,6 +153,32 @@ describe("Pulse actual-data projections", () => {
 				servers: [createServer({ state: { mem_used: undefined } })],
 			}).memory,
 		).toBeNull();
+	});
+	it("counts one primary rule per node and supports explicit rule selection without double counting", () => {
+		const fleet = {
+			now,
+			servers: [server, createServer({ id: 2 }), createServer({ id: 3 })],
+		};
+		const stats = {
+			...cycles,
+			second: {
+				...cycles.month,
+				server_name: { "2": "edge-2" },
+				transfer: { "2": 20 },
+			},
+		};
+		expect(totals(fleet, stats)).toMatchObject({
+			cycleUsed: 20,
+			cycleMax: 200,
+			cycleCount: 2,
+		});
+		expect(totals(fleet, stats, { "1": "custom" })).toMatchObject({
+			cycleUsed: 70,
+			cycleMax: 300,
+			cycleCount: 2,
+		});
+		expect(primaryCycleFor(stats, 1, "removed")?.key).toBe("month");
+		expect(primaryCycleFor(stats, 3)).toBeUndefined();
 	});
 	it("joins exact timestamps, keeps gaps and zero, and bounds ranges at both ends", () => {
 		const joined = joinMetrics(
@@ -214,6 +258,14 @@ describe("Pulse actual-data projections", () => {
 		});
 		expect(peakLimit([], [])).toBe(1);
 		expect(peakLimit(result.points, ["v1"])).toBe(50);
+		const timeout = monitorSeries([
+			{ ...monitors[0], created_at: [now], avg_delay: [0], packet_loss: [100] },
+		]);
+		expect(probeStats(timeout.points, "v0")).toMatchObject({
+			current: null,
+			average: null,
+			loss: 100,
+		});
 	});
 	it("converts realtime bytes exactly once and drops missing/offline snapshots", () => {
 		const p = realtimePoints(
